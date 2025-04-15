@@ -26,7 +26,7 @@ def draw_roi(frame):
 
 # Load TFLite model
 interpreter = tf.lite.Interpreter(
-    model_path="D:/project/1/tflite_model/yolov5s_416_fp16.tflite",
+    model_path="D:/project/PedestrianDetection-using-tflite-model/tflite_model/yolov5s_416_fp16.tflite",
     num_threads=4
 )
 interpreter.allocate_tensors()
