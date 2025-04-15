@@ -3,34 +3,63 @@ import numpy as np
 import tensorflow as tf
 import threading
 import time
-from roi import is_inside_roi, draw_roi
+import json
 from db import save_to_db
 from excel import save_to_excel
 from queue import Queue
 
+# Load ROI coordinates from JSON
+with open("roi_coordinates.json", "r") as f:
+    roi_coordinates = json.load(f)
+
+def is_inside_roi(x, y):
+
+    if len(roi_coordinates) != 4:
+        return False
+    pts = np.array(roi_coordinates, np.int32)
+    return cv2.pointPolygonTest(pts, (x, y), False) >= 0
+
+def draw_roi(frame):
+    if len(roi_coordinates) == 4:
+        pts = np.array(roi_coordinates, np.int32).reshape((-1, 1, 2))
+        cv2.polylines(frame, [pts], isClosed=True, color=(0, 255, 255), thickness=2)
+
 # Load TFLite model
-interpreter = tf.lite.Interpreter(model_path="D:/project/1/tflite_model/yolov5s_416_fp16.tflite")
+interpreter = tf.lite.Interpreter(
+    model_path="D:/project/1/tflite_model/yolov5s_416_fp16.tflite",
+    num_threads=4
+)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-# Constants
 CONF_THRESHOLD = 0.2
 IOU_THRESHOLD = 0.4
 PERSON_CLASS_ID = 0
+SAVE_INTERVAL = 10
 
-# Threaded video capture
 class VideoStream:
     def __init__(self, src):
         self.cap = cv2.VideoCapture(src)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.ret, self.frame = self.cap.read()
         self.stopped = False
-        threading.Thread(target=self.update, daemon=True).start()
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
 
     def update(self):
         while not self.stopped:
-            self.ret, self.frame = self.cap.read()
+            if self.cap.isOpened():
+                try:
+                    self.ret, self.frame = self.cap.read()
+                    if not self.ret:
+                        time.sleep(0.1)
+                except cv2.error as e:
+                    print(f"[OpenCV Error] {e}")
+                    time.sleep(0.1)
+            else:
+                print("[Stream Closed] Ending update loop.")
+                break
 
     def read(self):
         return self.ret, self.frame
@@ -80,7 +109,6 @@ def process_output(output, frame_shape):
             results.append([x1, y1, x2, y2, float(score)])
     return results
 
-# I/O thread worker
 def io_worker(queue):
     while True:
         count = queue.get()
@@ -98,13 +126,14 @@ def process_frames():
 
     prev_time = time.time()
     fps = 0.0
+    detection_counter = 0
 
     while True:
         ret, frame = stream.read()
         if not ret or frame is None:
+            time.sleep(0.1)
             continue
 
-        # FPS calculation
         curr_time = time.time()
         delta_time = curr_time - prev_time
         fps = 1.0 / delta_time if delta_time > 0 else 0.0
@@ -113,8 +142,7 @@ def process_frames():
         output = run_inference(frame)
         detections = process_output(output, frame.shape)
 
-        boxes = []
-        scores = []
+        boxes, scores = [], []
         for x1, y1, x2, y2, score in detections:
             boxes.append([x1, y1, x2 - x1, y2 - y1])
             scores.append(score)
@@ -127,42 +155,34 @@ def process_frames():
             cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
             if is_inside_roi(cx, cy):
                 person_count += 1
-
-                # Draw bounding box
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 cv2.circle(frame, (cx, cy), 3, (0, 255, 255), -1)
-
-                # Label: 'person: XX%'
                 label = f"person: {int(score * 100)}%"
-                font_scale = 0.7
-                thickness = 2
+                font_scale, thickness = 0.7, 2
                 font = cv2.FONT_HERSHEY_SIMPLEX
                 (label_width, label_height), baseline = cv2.getTextSize(label, font, font_scale, thickness)
                 label_x = x1
                 label_y = max(y1 - 10, label_height + 10)
-
-                # Draw label background
                 cv2.rectangle(frame,
                               (label_x, label_y - label_height - baseline),
                               (label_x + label_width, label_y + baseline),
                               (0, 255, 0), cv2.FILLED)
-
-                # Draw label text
                 cv2.putText(frame, label, (label_x, label_y),
                             font, font_scale, (0, 0, 0), thickness=thickness, lineType=cv2.LINE_AA)
 
         if person_count > 0:
-            io_queue.put(person_count)
+            detection_counter += 1
+            if detection_counter >= SAVE_INTERVAL:
+                io_queue.put(person_count)
+                detection_counter = 0
 
         draw_roi(frame)
 
-        # Draw FPS and count
         cv2.putText(frame, f"FPS: {fps:.2f}", (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 0), 2)
         cv2.putText(frame, f"Persons: {person_count}", (20, 80),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
 
-        # Display window
         cv2.namedWindow("Pedestrian Detection", cv2.WND_PROP_FULLSCREEN)
         cv2.setWindowProperty("Pedestrian Detection", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         cv2.imshow("Pedestrian Detection", frame)

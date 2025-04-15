@@ -18,12 +18,22 @@ conn.commit()
 
 # Save a detection record
 def save_to_db(person_count):
-    now = datetime.now()
-    date = now.strftime("%Y-%m-%d")
-    time_12hr = now.strftime("%I:%M:%S %p")
+    try:
+        now = datetime.now()
+        date = now.strftime("%Y-%m-%d")
+        time_12hr = now.strftime("%I:%M:%S %p")
 
-    cursor.execute(
-        "INSERT INTO person_detections (date, time, person_count) VALUES (?, ?, ?)",
-        (date, time_12hr, person_count)
-    )
-    conn.commit()
+        cursor.execute(
+            "INSERT INTO person_detections (date, time, person_count) VALUES (?, ?, ?)",
+            (date, time_12hr, person_count)
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"Error saving to database: {e}")
+
+# Close the connection when done
+def close_db():
+    try:
+        conn.close()
+    except Exception as e:
+        print(f"Error closing database connection: {e}")
