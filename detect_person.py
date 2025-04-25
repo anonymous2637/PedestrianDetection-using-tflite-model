@@ -4,8 +4,8 @@ import tensorflow as tf
 import threading
 import time
 import json
-from db import save_to_db
-from excel import save_to_excel
+# from db import save_to_db
+# from excel import save_to_excel
 from queue import Queue
 
 # Load ROI coordinates from JSON
@@ -13,7 +13,6 @@ with open("roi_coordinates.json", "r") as f:
     roi_coordinates = json.load(f)
 
 def is_inside_roi(x, y):
-
     if len(roi_coordinates) != 4:
         return False
     pts = np.array(roi_coordinates, np.int32)
@@ -26,17 +25,17 @@ def draw_roi(frame):
 
 # Load TFLite model
 interpreter = tf.lite.Interpreter(
-    model_path="D:/project/PedestrianDetection-using-tflite-model/tflite_model/yolov5s_416_fp16.tflite",
+    model_path="D:/project/1/tflite_model/lite2.tflite",
     num_threads=4
-)
+) 
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
-CONF_THRESHOLD = 0.2
-IOU_THRESHOLD = 0.4
+CONF_THRESHOLD = 0.25
+IOU_THRESHOLD = 0.05
 PERSON_CLASS_ID = 0
-SAVE_INTERVAL = 10
+SAVE_INTERVAL = 10 
 
 class VideoStream:
     def __init__(self, src):
@@ -72,15 +71,24 @@ def preprocess(frame):
     input_shape = input_details[0]['shape'][1:3]
     image = cv2.resize(frame, tuple(input_shape))
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    image = np.expand_dims(image / 255.0, axis=0).astype(np.float32)
+
+    if input_details[0]['dtype'] == np.uint8:
+        image = np.expand_dims(image, axis=0).astype(np.uint8)
+    else:
+        image = np.expand_dims(image / 255.0, axis=0).astype(np.float32)
+
     return image
 
 def run_inference(frame):
     input_data = preprocess(frame)
     interpreter.set_tensor(input_details[0]['index'], input_data)
     interpreter.invoke()
-    output_data = interpreter.get_tensor(output_details[0]['index'])[0]
-    return output_data
+
+    boxes = interpreter.get_tensor(output_details[0]['index'])[0]
+    class_ids = interpreter.get_tensor(output_details[1]['index'])[0]
+    scores = interpreter.get_tensor(output_details[2]['index'])[0]
+
+    return boxes, class_ids, scores
 
 def apply_nms(boxes, scores, conf_thresh, iou_thresh):
     indices = cv2.dnn.NMSBoxes(boxes, scores, conf_thresh, iou_thresh)
@@ -91,31 +99,52 @@ def apply_nms(boxes, scores, conf_thresh, iou_thresh):
     else:
         return []
 
-def process_output(output, frame_shape):
-    h, w, _ = frame_shape
-    results = []
-    for det in output:
-        x_center, y_center, width, height, conf = det[:5]
-        class_probs = det[5:]
-        class_id = np.argmax(class_probs)
-        class_score = class_probs[class_id]
-        score = conf * class_score
+def process_output(boxes, class_ids, scores, frame_shape):
+    # Normalize all outputs
+    if isinstance(class_ids, np.ndarray):
+        class_ids = class_ids.flatten().tolist()
+    elif not isinstance(class_ids, list):
+        class_ids = [int(class_ids)]
 
-        if score > CONF_THRESHOLD and class_id == PERSON_CLASS_ID:
-            x1 = int((x_center - width / 2) * w)
-            y1 = int((y_center - height / 2) * h)
-            x2 = int((x_center + width / 2) * w)
-            y2 = int((y_center + height / 2) * h)
-            results.append([x1, y1, x2, y2, float(score)])
-    return results
+    if isinstance(scores, np.ndarray):
+        scores = scores.flatten().tolist()
+    elif not isinstance(scores, list):
+        scores = [float(scores)]
+
+    if isinstance(boxes, np.ndarray):
+        if boxes.ndim == 2:
+            boxes = boxes.tolist()
+        elif boxes.ndim == 1:
+            boxes = [boxes.tolist()]
+    elif not isinstance(boxes, list):
+        boxes = [boxes]
+
+    detections = []
+    height, width, _ = frame_shape
+
+    min_len = min(len(class_ids), len(scores), len(boxes))
+    for i in range(min_len):
+        class_id = int(class_ids[i])
+        score = float(scores[i])
+        box = boxes[i]
+
+        if class_id == PERSON_CLASS_ID and score > CONF_THRESHOLD:
+            y_min, x_min, y_max, x_max = box
+            x = int(x_min * width)
+            y = int(y_min * height)
+            w = int((x_max - x_min) * width)
+            h = int((y_max - y_min) * height)
+            detections.append((x, y, x + w, y + h, score))
+
+    return detections
 
 def io_worker(queue):
     while True:
         count = queue.get()
         if count is None:
             break
-        save_to_db(count)
-        save_to_excel(count)
+        # save_to_db(count)
+        # save_to_excel(count)
         queue.task_done()
 
 def process_frames():
@@ -139,8 +168,8 @@ def process_frames():
         fps = 1.0 / delta_time if delta_time > 0 else 0.0
         prev_time = curr_time
 
-        output = run_inference(frame)
-        detections = process_output(output, frame.shape)
+        boxes, class_ids, scores = run_inference(frame)
+        detections = process_output(boxes, class_ids, scores, frame.shape)
 
         boxes, scores = [], []
         for x1, y1, x2, y2, score in detections:
